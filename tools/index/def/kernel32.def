@@ -1,0 +1,21 @@
+LIBRARY kernel32.dll
+
+EXPORTS
+
+GetProcessHeap
+HeapAlloc
+HeapFree
+HeapReAlloc
+ReadFile
+WriteFile
+CreateFileA
+CloseHandle
+GetStdHandle
+ExitProcess
+Sleep
+GetCommandLineA
+GetFileTime
+FileTimeToSystemTime
+SystemTimeToFileTime
+SetEnvironmentVariableA
+GetEnvironmentVariableA
