@@ -1,5 +1,3 @@
-## Installation
-
 It's inference engine for Qwen3 models with Bare Metal launch process.
 
 ## Requriments
