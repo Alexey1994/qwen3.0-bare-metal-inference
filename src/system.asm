@@ -28,6 +28,40 @@ use32
 ;mov EAX, 0xB8000
 ;mov word[EAX], 1 + 2*256
 
+
+enable_sse:
+    ; ---------------------------------------------------------
+    ; ШАГ 1: Настройка CR0 (Control Register 0)
+    ; Бит 1 (MP) = 1 : Monitor Coprocessor (нужен для WAIT/FWAIT)
+    ; Бит 2 (EM) = 0 : Emulation (должен быть 0, иначе #UD при FPU/SSE)
+    ; Бит 3 (TS) = 0 : Task Switched (сбрасываем, чтобы не было #NM)
+    ; ---------------------------------------------------------
+    mov     eax, cr0
+    and     ax, 0xFFFB          ; Сброс бита 2 (CR0.EM = 0)
+    or      ax, 0x0002          ; Установка бита 1 (CR0.MP = 1)
+    and     ax, 0xFFF7          ; Сброс бита 3 (CR0.TS = 0)
+    mov     cr0, eax
+
+    ; ---------------------------------------------------------
+    ; ШАГ 2: Настройка CR4 (Control Register 4)
+    ; Бит 9  (OSFXSR)     = 1 : Операционная система поддерживает FXSAVE/FXRSTOR
+    ;                           и SSE-инструкции. Без этого бита #UD!
+    ; Бит 10 (OSXMMEXCPT) = 1 : ОС обрабатывает исключения SIMD (#XM).
+    ;                           Рекомендуется включить вместе с OSFXSR.
+    ; ---------------------------------------------------------
+    mov     eax, cr4
+    or      ax, 0x0600          ; Установка битов 9 и 10
+    mov     cr4, eax
+
+    ; ---------------------------------------------------------
+    ; ШАГ 3: Инициализация состояния x87 FPU
+    ; Устанавливает регистры управления FPU в значения по умолчанию.
+    ; Обязательно, т.к. после аппаратного сброса состояние не определено.
+    ; ---------------------------------------------------------
+    fninit
+
+
+push matmul_optimized
 push read_sector
 call main
 add ESP, 4
@@ -53,7 +87,7 @@ switch_to_16_bits:
 
 	pop dword [saved_EIP]
 	mov [saved_ESP], ESP
-	;xor ESP, ESP
+	xor ESP, ESP
 	
 	lidt [idtr_16]
 
@@ -84,10 +118,10 @@ switch_to_16_bits:
 	mov FS, AX
 	mov GS, AX
 	
-	;mov SP, 0x1000
-	;push word [saved_EIP]
+	mov SP, 0x1000
+	push word [saved_EIP]
 
-	pop AX
+	;pop AX
 	;pop BX
 	;push AX
 	
@@ -296,14 +330,182 @@ read_sector:
 	LBA_packet:
 		size:                   db 16
 		zero:                   db 0
-		number_of_sectors:      dw 1
-		buffer_address_offset:  dw 0x600
-		buffer_address_segment: dw 0
+		number_of_sectors:      dw 127
+		buffer_address_offset:  dw 0
+		buffer_address_segment: dw 0x2000
 		start_sector_low:       dd 0
 		start_sector_high:      dd 0
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+
+; ============================================================================
+; void matmul_optimized(float* C, float* A, float* B, int M, int K, int N)
+;
+; 32-bit x86, cdecl, bare-metal.
+; Требует SSE (CR4.OSFXSR = 1).
+; Компиляция: nasm -f elf32 matmul.asm
+;             или nasm -f win32 matmul.asm (для TCC под Windows)
+; ============================================================================
+
+bits 32
+
+;section .text
+;global matmul_optimized
+;export matmul_optimized
+
+; Смещения аргументов (cdecl, после push ebp):
+%define ARG_C       [ebp + 8]
+%define ARG_A       [ebp + 12]
+%define ARG_B       [ebp + 16]
+%define ARG_M       [ebp + 20]
+%define ARG_K       [ebp + 24]
+%define ARG_N       [ebp + 28]
+
+; Локальные переменные на стеке:
+%define LOC_K_BYTES     [esp + 0]
+%define LOC_PTR_A_ROW   [esp + 4]
+%define LOC_PTR_C_ROW   [esp + 8]
+%define LOC_PTR_B_COL   [esp + 12]
+%define LOC_I           [esp + 16]
+%define LOC_J           [esp + 20]
+
+matmul_optimized:
+    push    ebp
+    mov     ebp, esp
+    sub     esp, 24             ; 6 × 4 байта для локальных переменных
+
+    push    ebx                 ; callee-saved
+    push    esi                 ; callee-saved
+    push    edi                 ; callee-saved
+
+    ; Проверяем M > 0
+    mov     eax, ARG_M
+    test    eax, eax
+    jle     .exit
+
+    ; K_bytes = K * 4
+    mov     eax, ARG_K
+    shl     eax, 2
+    mov     LOC_K_BYTES, eax
+
+    ; i = 0
+    mov     dword LOC_I, 0
+
+.L_i:
+    mov     ecx, LOC_I
+    cmp     ecx, ARG_M
+    jge     .exit
+
+    ; ptr_a_row = A + i * K_bytes
+    mov     eax, ecx
+    imul    eax, LOC_K_BYTES
+    add     eax, ARG_A
+    mov     LOC_PTR_A_ROW, eax
+
+    ; ptr_c_row = C + i * N * 4
+    mov     eax, ecx
+    imul    eax, ARG_N
+    shl     eax, 2
+    add     eax, ARG_C
+    mov     LOC_PTR_C_ROW, eax
+
+    ; j = 0
+    mov     dword LOC_J, 0
+
+.L_j:
+    mov     edx, LOC_J
+    cmp     edx, ARG_N
+    jge     .L_next_i
+
+    ; ptr_b_col = B + j * K_bytes
+    ; (Предполагается, что B транспонирована, как в оригинале)
+    mov     eax, edx
+    imul    eax, LOC_K_BYTES
+    add     eax, ARG_B
+    mov     LOC_PTR_B_COL, eax
+
+    ; sum = 0.0f
+    xorps   xmm0, xmm0
+
+    ; K_vec = K / 4
+    mov     ecx, ARG_K
+    shr     ecx, 2
+    jz      .L_hsum
+
+    ; cursor_a и cursor_b
+    mov     esi, LOC_PTR_A_ROW
+    mov     edi, LOC_PTR_B_COL
+
+.L_k_vec:
+    movups  xmm1, [esi]         ; 4 floats из A
+    movups  xmm2, [edi]         ; 4 floats из B
+    mulps   xmm1, xmm2          ; поэлементное умножение
+    addps   xmm0, xmm1          ; накопление суммы
+    add     esi, 16             ; += 4 * sizeof(float)
+    add     edi, 16
+    dec     ecx
+    jnz     .L_k_vec
+
+.L_hsum:
+    ; Горизонтальная сумма xmm0: [s3, s2, s1, s0] -> s0+s1+s2+s3
+    movaps  xmm1, xmm0
+    shufps  xmm1, xmm1, 0x0E    ; [s1, s0, s3, s2]
+    addps   xmm0, xmm1          ; [s1+s3, s0+s2, s1+s3, s0+s2]
+    movaps  xmm1, xmm0
+    shufps  xmm1, xmm1, 0x01    ; [s0+s2, ..., ..., ...]
+    addss   xmm0, xmm1          ; xmm0[0] = итоговая сумма
+
+    ; K_rem = K % 4
+    mov     ecx, ARG_K
+    and     ecx, 3
+    jz      .L_store
+
+    ; Вычисляем смещение после векторной части: (K / 4) * 16
+    mov     eax, ARG_K
+    shr     eax, 2
+    shl     eax, 4
+    mov     esi, LOC_PTR_A_ROW
+    add     esi, eax
+    mov     edi, LOC_PTR_B_COL
+    add     edi, eax
+
+.L_k_scalar:
+    movss   xmm1, [esi]
+    movss   xmm2, [edi]
+    mulss   xmm1, xmm2
+    addss   xmm0, xmm1
+    add     esi, 4
+    add     edi, 4
+    dec     ecx
+    jnz     .L_k_scalar
+
+.L_store:
+    ; C[i][j] = sum
+    mov     edi, LOC_PTR_C_ROW
+    mov     eax, LOC_J
+    movss   [edi + eax*4], xmm0
+
+    ; j++
+    inc     dword LOC_J
+    jmp     .L_j
+
+.L_next_i:
+    ; i++
+    inc     dword LOC_I
+    jmp     .L_i
+
+.exit:
+    pop     edi
+    pop     esi
+    pop     ebx
+    mov     esp, ebp
+    pop     ebp
+    ret                         ; caller чистит стек (cdecl)
+
+
 
 align 32
 main:

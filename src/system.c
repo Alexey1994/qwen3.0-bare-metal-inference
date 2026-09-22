@@ -31,16 +31,20 @@ typedef Number                 Boolean;
 
 typedef struct {
 	void (*read_sector) (Number32 sector);
+	void (*matmul_optimized) (Float32* C, Float32* A, Float32* B, Number M, Number K, Number N);
 }
 Loader_Api;
 
 
 Loader_Api* loader_api;
 
+void (*matmul_optimized)(Float32* C, Float32* A, Float32* B, Number M, Number K, Number N) = 0;
+
 void main();
 void _start(Loader_Api api)
 {
 	loader_api = &api;
+	matmul_optimized = api.matmul_optimized;
 	main();
 }
 
@@ -109,9 +113,9 @@ Number32 open_file(Byte* name)
 
 	for(;;) {
 		loader_api->read_sector(sector_number);
-		sector = 0x600;
+		sector = 0x20000;
 
-		for(i=0; i<15; ++i) {
+		for(i=0; i<31; ++i) {
 			Byte* file = sector + i*16;
 
 			for(j=0; j<12; ++j) {
@@ -141,12 +145,22 @@ Byte* load_file(Number32 sector_number)
 	Byte* file_data;
 	Byte* sector;
 	Number i;
+	Number32 current_sector;
 
 	file_data = heap_top;
 
+	loader_api->read_sector(sector_number);
+	current_sector = sector_number;
+
 	while(sector_number) {
-		loader_api->read_sector(sector_number);
-		sector = 0x600;
+		if(sector_number >= current_sector && sector_number < current_sector + 127) {
+			sector = 0x20000 + (sector_number - current_sector) * 512;
+		}
+		else {
+			loader_api->read_sector(sector_number);
+			sector = 0x20000;
+			current_sector =  sector_number;
+		}
 
 		for(i=0; i<508; ++i) {
 			heap_top[i] = sector[i];
@@ -343,6 +357,149 @@ void write_character_in_text_display(Number character)
 }
 
 
+// Keyboard ///////////////////////////////////////////////////////////////////////
+
+
+typedef enum {
+	PS2_OUTPUT_BUFFER_FULL       = 0b00000001,
+	PS2_INPUT_BUFFER_FULL        = 0b00000010,
+	PS2_INITIALIZED              = 0b00000100,
+	PS2_A2_STATE                 = 0b00001000,
+	PS2_KEYBOARD_CONNECTED       = 0b00010000,
+	PS2_MOUSE_OUTPUT_BUFFER_FULL = 0b00100000,
+	PS2_TIMEOUT_ERROR            = 0b01000000,
+	PS2_PARITY_ERROR             = 0b10000000
+}
+PS2_State;
+
+
+typedef enum {
+	KEY_ESCAPE = 1,
+	
+	KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9, KEY_0, KEY_MINUS, KEY_EQUAL, KEY_BACKSPACE,
+	KEY_TAB, KEY_Q, KEY_W, KEY_E, KEY_R, KEY_T, KEY_Y, KEY_U, KEY_I, KEY_O, KEY_P, KEY_OPEN_SQUARE_BRACKET, KEY_CLOSE_SQUARE_BRACKET, KEY_ENTER,
+	KEY_LEFT_CONTROL, KEY_A, KEY_S, KEY_D, KEY_F, KEY_G, KEY_H, KEY_J, KEY_K, KEY_L, KEY_SEMICOLON, KEY_APOSTROPHE, KEY_BACKTICK,
+	KEY_LEFT_SHIFT, KEY_BACKSLASH, KEY_Z, KEY_X, KEY_C, KEY_V, KEY_B, KEY_N, KEY_M, KEY_COMMA, KEY_DOT, KEY_SLASH, KEY_RIGHT_SHIFT,
+	
+	KEY_NUMPAD_MUL,
+	KEY_LEFT_ALT,
+	KEY_SPACE,
+	
+	KEY_CAPSLOCK,
+	KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6, KEY_F7, KEY_F8, KEY_F9, KEY_F10,
+	KEY_NUM_LOCK, KEY_SCROLL_LOCK,
+	
+	KEY_NUMPAD_7, KEY_NUMPAD_8, KEY_NUMPAD_9, KEY_NUMPAD_MINUS,
+	KEY_NUMPAD_4, KEY_NUMPAD_5, KEY_NUMPAD_6, KEY_NUMPAD_PLUS,
+	KEY_NUMPAD_1, KEY_NUMPAD_2, KEY_NUMPAD_3,
+	KEY_NUMPAD_0, KEY_NUMPAD_DOT,
+	
+	KEY_F11 = 87,
+	KEY_F12 = 88,
+
+
+
+
+	KEY_NUMPAD_ENTER = 156,
+	KEY_RIGHT_CONTROL = 157,
+	KEY_PRINT_SCREEN2 = 170,
+	KEY_NUMPAD_DIV = 181,
+	KEY_PRINT_SCREEN = 183,
+	KEY_RIGHT_ALT = 184,
+	
+	KEY_HOME = 199,
+	KEY_ARROW_UP = 200,
+	KEY_PAGE_UP = 201,
+	KEY_ARROW_LEFT = 203,
+	KEY_ARROW_RIGHT = 205,
+	KEY_END = 207,
+	KEY_ARROW_DOWN = 208,
+	KEY_PAGE_DOWN = 209,
+	KEY_INSERT = 210,
+	KEY_DELETE = 211,
+	
+	KEY_OS = 219,
+	KEY_CONTEXT_MENU = 221,
+}
+Key_Code;
+
+Byte key_to_char_code[128] = {
+	0,
+
+	0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 0,
+	'\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', 0, //'\r',
+	0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',
+	0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0,
+	
+	'*', //55, * on numpad
+	
+	0, ' ', //57
+	
+	0, //58 CapsLock
+	
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //68 F10
+	
+	0, 0, //70 ScrollLock
+	
+	//Numpad
+	'7', '8', '9', '-',
+	'4', '5', '6', '+',
+	'1', '2', '3',
+	'0', '.', //83
+};
+
+Byte key_to_shifted_char_code[128] = {
+	0,
+
+	0, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', 0,
+	0, 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', 0, //'\r',
+	0, 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~',
+	0, '|', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0,
+	
+	'*', //55, * on numpad
+	
+	0, ' ', //57
+	
+	0, //58 CapsLock
+	
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //68 F10
+	
+	0, 0, //70 ScrollLock
+	
+	//Numpad
+	0, 0, 0, '-',
+	0, 0, 0, '+',
+	0, 0, 0,
+	0, 0, //83
+};
+
+Number32 read_key_state()
+{
+	Byte     ps2_key_state;
+	Number32 key_state;
+
+	if(!(in_8(0x64) & PS2_OUTPUT_BUFFER_FULL)) {
+		return 0;
+	}
+
+	ps2_key_state = in_8(0x60);
+
+	if(ps2_key_state == 0xE0) {
+		ps2_key_state = in_8(0x60);
+		key_state = (ps2_key_state & 0b1111111) + 128;
+	}
+	else {
+		key_state = ps2_key_state & 0b1111111;
+	}
+	
+	if(ps2_key_state & 0b10000000) {
+		key_state |= 0x80000000;
+	}
+
+	return key_state;
+}
+
+
 // Writer /////////////////////////////////////////////////////////////////////////
 
 void write_Number(void(*write_byte)(Byte byte), Number number)
@@ -407,6 +564,11 @@ Signed_Number write(void(*write_byte)(Byte byte), Byte* format, Byte** values)
 
 			switch(character) {
 				
+				case 'c':
+					write_byte(*values);
+					++values;
+					break;
+
 				case 'u':
 					write_Number(write_byte, *(Number32*)values);
 					++values;
@@ -600,7 +762,7 @@ Float32* post_attn_norm[NUM_LAYERS];
 Float32* final_norm;
 
 
-Number32 tokens[4096];// = {17, 10, 17};
+Number32 tokens[MAX_SEQ_LEN];// = {17, 10, 17};
 Number32 seq_len = 0;
 
 
@@ -650,6 +812,11 @@ Float32* read_BF16_tensor(Number size, Byte* format, ...)
 	write_byte_in_string('\0');
 
 	file = open_file(tensor_name);
+
+	if(file==0) {
+		print("%s not loaded\n", tensor_name);
+	}
+
 	buffer = load_file(file);
 
 	for(i=0; i<size; ++i) {
@@ -662,7 +829,7 @@ Float32* read_BF16_tensor(Number size, Byte* format, ...)
 }
 
 
-#include "cpu.c"
+//#include "cpu.c"
 //#include "opencl.c"
 //#include "sse2.c"
 
@@ -703,9 +870,21 @@ Float32* last_logits;
 Float32* tmp0;
 Float32* output;
 
+//Number num_of_message = 0;
 
 Number generate_next_token()
 {
+	/*
+	++num_of_message;
+
+	if(num_of_message % 8) {
+		return 1;
+	}
+	else {
+		return 151645;
+	}
+	*/
+
 	Number32 i, j, k, l, h, d;
 
 	cache_K[seq_len-1] = create_tensor(NUM_LAYERS * KV_HIDDEN_SIZE);
@@ -877,24 +1056,330 @@ Number generate_next_token()
 
 // Tokenizer //////////////////////////////////////////////////////////////////////
 
+typedef struct {
+	Number32 token;
+	Number32 len;
+	Byte bytes[];
+} TokenVocab;
+
+typedef struct {
+	Number32 left;
+	Number32 right;
+	Number32 merged;
+} MergeRule;
+
+
+TokenVocab* vocab;
+Number32    vocab_size;
+
+MergeRule*  merges;
+Number32    num_merges;
+
+TokenVocab** vocab_index;
+TokenVocab** sorted_vocabs;
+
+
+Signed_Number compare_strings(Byte* string1, Byte* string2)
+{
+	Signed_Number difference;
+
+	while(*string1 && *string2) {
+		difference = (Signed_Number)*string1 - (Signed_Number)*string2;
+
+		if(difference) {
+			return difference;
+		}
+
+		++string1;
+		++string2;
+	}
+
+	return (Signed_Number)*string1 - (Signed_Number)*string2;
+}
+
+
+void copy_bytes(Byte* destination, Byte* source, Number size)
+{
+	Number system_size;
+	Number remind_size;
+
+	system_size = size / sizeof(Number);
+	remind_size = size % sizeof(Number);
+
+	while(system_size) {
+		*((Number*)destination) = *((Number*)source);
+
+		--system_size;
+		destination += sizeof(Number);
+		source += sizeof(Number);
+	}
+
+	while(remind_size) {
+		*destination = *source;
+
+		--remind_size;
+		++destination;
+		++source;
+	}
+}
+
+
+void sort_vocab(TokenVocab** vocab, Number32 size)
+{
+	if(size < 2) {
+
+	}
+	else if(size < 3) {
+		TokenVocab** a = vocab;
+		TokenVocab** b = a + 1;
+
+		if((Signed_Number32)(*b)->len - (Signed_Number32)(*a)->len <= 0) {
+
+		}
+		else {
+			TokenVocab* tmp = *a;
+			*a = *b;
+			*b = tmp;
+		}
+	}
+	else {
+		Number32 middle = size / 2;
+		Number32 l_size = middle;
+		Number32 r_size = size - middle;
+		Number32 i;
+		Number32 li;
+		Number32 ri;
+
+		TokenVocab** l = allocate_memory(l_size * sizeof(TokenVocab*));
+		copy_bytes(l, vocab, l_size * sizeof(TokenVocab*));
+		sort_vocab(l, l_size);
+
+		TokenVocab** r = allocate_memory(r_size * sizeof(TokenVocab*));
+		copy_bytes(r, vocab + middle, r_size * sizeof(TokenVocab*));
+		sort_vocab(r, r_size);
+
+		li = 0;
+		ri = 0;
+
+		for(i = 0; ; ++i) {
+			if(li < l_size && (ri >= r_size || ((Signed_Number32)r[ri]->len - (Signed_Number32)l[li]->len) <= 0)) {
+				vocab[i] = l[li];
+				++li;
+			}
+			else if(ri < r_size) {
+				vocab[i] = r[ri];
+				++ri;
+			}
+			else {
+				break;
+			}
+		}
+
+		free_memory(r);
+		free_memory(l);
+	}
+}
+
+
+void init_tokenizer(Byte* filename) {
+	Number32 file = open_file(filename);
+	Byte* file_data = load_file(file);
+	Number32 i;
+	Number32 j;
+
+	vocab_size = *(Number32*)(file_data);
+	vocab = file_data + 4;
+
+	sorted_vocabs = allocate_memory(vocab_size * sizeof(TokenVocab*));
+	vocab_index = allocate_memory(vocab_size * sizeof(TokenVocab*));
+
+	TokenVocab* current_token = vocab;
+
+	for(i=0; i<vocab_size; ++i) {
+	//for(i=0; i<10; ++i) {
+		//for(j=0; j<current_token->len; ++j) {
+		//	print("%c", current_token->bytes[j]);
+		//}
+
+		sorted_vocabs[i] = current_token;
+		vocab_index[i] = current_token;
+
+		current_token = (Byte*)current_token + sizeof(TokenVocab) + current_token->len;
+	}
+
+	sort_vocab(sorted_vocabs, vocab_size);
+/*
+	for(i=0; i<10; ++i) {
+		for(j=0; j<sorted_vocabs[i]->len; ++j) {
+			print("%c", sorted_vocabs[i]->bytes[j]);
+		}
+	}
+*/
+
+/*
+	read_bytes_from_file(file, (Byte*)&vocab_size, 4);
+	read_bytes_from_file(file, (Byte*)&num_merges, 4);
+
+	vocab = allocate_memory(vocab_size * sizeof(TokenVocab));
+	sorted_vocabs = allocate_memory(vocab_size * sizeof(TokenVocab*));
+	for(Number32 i = 0; i < vocab_size; ++i) {
+		read_bytes_from_file(file, (Byte*)&vocab[i].len, 4);
+		vocab[i].bytes = allocate_memory(vocab[i].len + 1);
+		read_bytes_from_file(file, vocab[i].bytes, vocab[i].len);
+		vocab[i].bytes[vocab[i].len] = '\0';
+
+		sorted_vocabs[i] = vocab + i;
+	}
+
+	sort_vocab(sorted_vocabs, vocab_size);
+
+	merges = allocate_memory(num_merges * sizeof(MergeRule));
+	read_bytes_from_file(file, merges, num_merges * sizeof(MergeRule));
+
+	close_file(file);*/
+}
+
+
+Signed_Number32 find_substring(Byte* text, Number32 text_size, Byte* substring, Number32 substring_size)
+{
+	Number32 i;
+	Number32 j;
+
+	for(i=0; i+substring_size <= text_size; ++i) {
+		for(j=0; j<substring_size && j+i<text_size; ++j) {
+			if(substring[j] != text[i + j]) {
+				break;
+			}
+		}
+
+		if(j == substring_size) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+
+typedef struct {
+	struct List* next;
+	Number32 type; // 0 - text, 1 - token
+	Byte*    value;
+	Number32 value_size;
+}
+List;
+
+
+List* tokens_list;
+
+
+Number tokenize(Byte* text, Number32 text_size)
+{
+	Number32 i;
+
+	tokens_list = allocate_memory(sizeof(List));
+	tokens_list->next = 0;
+	tokens_list->type = 0;
+	tokens_list->value = text;
+	tokens_list->value_size = text_size;
+
+	for(i=0; i<vocab_size; ++i) {
+
+		List* current = tokens_list;
+
+		while(current) {
+			if(current->type == 0) {
+				Signed_Number32 find_index = find_substring(current->value, current->value_size, sorted_vocabs[i]->bytes, sorted_vocabs[i]->len);
+
+				if(find_index >= 0) {
+					List* new_token = allocate_memory(sizeof(List));
+					new_token->type = 1;
+					new_token->value = sorted_vocabs[i]->token;
+
+					List* new_text = allocate_memory(sizeof(List));
+					new_text->next = current->next;
+					new_text->type = 0;
+					new_text->value = current->value + find_index + sorted_vocabs[i]->len;
+					new_text->value_size = current->value_size - find_index - sorted_vocabs[i]->len;
+
+					current->value_size = find_index;
+					current->next = new_token;
+					new_token->next = new_text;
+				}
+			}
+
+			current = current->next;
+		}
+	}
+
+
+	Number num_of_new_tokens = 0;
+
+	List* current_token = tokens_list;
+
+	while(current_token) {
+		while(current_token && current_token->type != 1) {
+			current_token = current_token->next;
+		}
+
+		if(current_token) {
+			Number32 token = current_token->value;
+			current_token = current_token->next;
+
+			//print("%d ", token);
+
+			tokens[seq_len + num_of_new_tokens] = token;
+			++num_of_new_tokens;
+		}
+	}
+
+	free_memory(tokens_list);
+
+	return num_of_new_tokens;
+}
+
+
+Byte message[2048];
+Number32 message_size = 0;
+
+
+void print_tokens()
+{
+	Number i;
+
+	for(i=0; i<seq_len; ++i) {
+		TokenVocab* vocab_token = vocab_index[tokens[i]];
+		
+		Number32 j;
+		for(j=0; j<vocab_token->len; ++j) {
+			print("%c", vocab_token->bytes[j]);
+		}
+	}
+}
+
 
 void main()
 {
+	Number32 i;
+
+/*
+	//return;
+
 	//((Number16*)(0xB8000))[0] = 1 + (2<<8);
 
-	//Number32 f;
+	Number32 f;
 
-	//f = open_file("tokenizer");
+	f = open_file("tokenizer");
 
 	//write_character_in_text_display('H');
 	//write_character_in_text_display('i');
 
-	//print("Hi %d", f);
+	print("Hi %d", f);
+	return;
+*/
+
 
 	print("Loading...");
-
-
-	Number32 i;
 
 
 	embed_tokens = read_BF16_tensor(EMBED_TOKENS_SIZE*HIDDEN_SIZE, "embed");
@@ -916,63 +1401,194 @@ void main()
 	final_norm = read_BF16_tensor(HIDDEN_SIZE, "norm");
 
 
-	tmp0 = create_tensor(4096 * HIDDEN_SIZE);
+	tmp0 = create_tensor(HIDDEN_SIZE);
 
-	Q = create_tensor(4096 * Q_HIDDEN_SIZE);
-	K = create_tensor(4096 * HIDDEN_SIZE);
-	V = create_tensor(4096 * HIDDEN_SIZE);
-	O = create_tensor(4096 * Q_HIDDEN_SIZE);
+	Q = create_tensor(Q_HIDDEN_SIZE);
+	K = create_tensor(HIDDEN_SIZE);
+	V = create_tensor(HIDDEN_SIZE);
+	O = create_tensor(Q_HIDDEN_SIZE);
 
-	scores = create_tensor(4096);
+	scores = create_tensor(MAX_SEQ_LEN);
 
-	gate = create_tensor(4096 * INTERMEDIATE_SIZE);
-	up = create_tensor(4096 * INTERMEDIATE_SIZE);
-	hidden = create_tensor(4096 * INTERMEDIATE_SIZE);
+	gate = create_tensor(INTERMEDIATE_SIZE);
+	up = create_tensor(INTERMEDIATE_SIZE);
+	hidden = create_tensor(INTERMEDIATE_SIZE);
 
 	last_logits = create_tensor(EMBED_TOKENS_SIZE);
 
-	output = create_tensor(4096 * HIDDEN_SIZE);
+	output = create_tensor(HIDDEN_SIZE);
+
+	
 
 
-	print("ok\n");
+	Byte start_prompt[] = "<|im_start|>system\n"
+		"You are God\n"
+		"<|im_end|>\n"
+		"<|im_start|>user\n";
 
-	tokens[0] = 17;
-	tokens[1] = 10;
-	tokens[2] = 17;
-	seq_len = 3;
+	Byte start_message_prompt[] = "<|im_end|>\n"
+		"<|im_start|>user\n";
+
+	Byte end_message_prompt[] = "<|im_end|>\n"
+		"<|im_start|>assistant\n"
+		"<think>\n"
+		"</think>";
+
+	Number32 num_of_new_tokens;
 
 
-	Number32 token;
-	Number seq_len2 = seq_len;
-	for(seq_len=1; seq_len<=seq_len2; ++seq_len) {
-		token = tokens[seq_len-1];
+	init_tokenizer("tokenizer");
 
-		//Byte* decoded_text = (token < vocab_size && vocab[token].bytes)
-		//	? vocab[token].bytes
-		//	: "<unk>";
-		
-		//print("%s", vocab[token].bytes);
+	num_of_new_tokens = tokenize(start_prompt, sizeof(start_prompt)-1);
 
-		token = generate_next_token();
+	seq_len=1;
+	for(i=0; i<num_of_new_tokens; ++i) {
+		generate_next_token();
+		++seq_len;
 	}
 
-	print("%d", token);
-/*
-	for(; seq_len<4096; ++seq_len) {
-		if(token == 151645) {
-			break;
+
+	print("ok\n\n>");
+
+
+	Number32 shift_active = 0;
+
+	for(;;) {
+		Number32 key_state;
+		Byte key_code;
+
+		key_state = read_key_state();
+		key_code = key_state & 0xFF;
+
+		if(!key_state) {
+			asm("hlt");
 		}
 
-		tokens[seq_len-1] = token;
+		if(!(key_state & 0x80000000)) {
+			switch(key_code) {
+				case KEY_LEFT_SHIFT:
+				case KEY_RIGHT_SHIFT: {
+					shift_active = 1;
+					break;
+				}
 
-		//Byte* decoded_text = (token < vocab_size && vocab[token].bytes)
-		//	? vocab[token].bytes
-		//	: "<unk>";
-		
-		print("%s", vocab[token].bytes);
+				case KEY_BACKSPACE: {
+					if(message_size) {
+						if(cursor_pos_x == 0) {
+							cursor_pos_x = TEXT_DISPLAY_WIDTH - 1;
 
-		token = generate_next_token();
+							if(cursor_pos_y) {
+								--cursor_pos_y;
+							}
+						}
+						else {
+							--cursor_pos_x;
+						}
+						
+						set_text_display_cursor_position(cursor_pos_x, cursor_pos_y);
+						set_character_in_text_display(cursor_pos_x, cursor_pos_y, ' ');
 
-		//printf("next_token: %d %lld us\n", token, (t1 - t0) * 1000000 / frequency);
-	}*/
+						--message_size;
+					}
+
+					break;
+				}
+
+				case KEY_ENTER: {
+					print("\n");
+
+					if(shift_active) {
+						message[message_size] = '\n';
+						++message_size;
+					}
+					else {
+						if(message_size) {
+							//for(i=0; i<message_size; ++i) {
+							//	print("%c", message[i]);
+							//}
+
+							text_color = 6;
+
+							num_of_new_tokens = tokenize(start_message_prompt, sizeof(start_message_prompt)-1);
+
+							for(i=0; i<num_of_new_tokens; ++i) {
+								generate_next_token();
+								++seq_len;
+							}
+
+							num_of_new_tokens = tokenize(message, message_size);
+
+							for(i=0; i<num_of_new_tokens; ++i) {
+								generate_next_token();
+								++seq_len;
+							}
+
+							num_of_new_tokens = tokenize(end_message_prompt, sizeof(end_message_prompt)-1);
+
+							for(i=0; i<num_of_new_tokens; ++i) {
+								generate_next_token();
+								++seq_len;
+							}
+
+							for(i=seq_len; i<MAX_SEQ_LEN; ++i) {
+								Number32 token = generate_next_token();
+
+								if(token == 151645) {
+									break;
+								}
+
+								tokens[seq_len] = token;
+								++seq_len;
+
+								TokenVocab* vocab_token = vocab_index[token];
+								Number32 j;
+
+								for(j=0; j<vocab_token->len; ++j) {
+									print("%c", vocab_token->bytes[j]);
+								}
+							}
+
+							text_color = 7;
+
+							print("\n\n>");
+						}
+						else {
+							//print_tokens();
+						}
+
+						message_size = 0;
+					}
+
+					break;
+				}
+
+				default: {
+					Byte character;
+
+					if(shift_active) {
+						character = key_to_shifted_char_code[key_code];
+					}
+					else {
+						character = key_to_char_code[key_code];
+					}
+
+					if(character) {
+						print("%c", character);
+					
+						message[message_size] = character;
+						++message_size;
+					}
+				}
+			}
+		}
+		else {
+			switch(key_code) {
+				case KEY_LEFT_SHIFT:
+				case KEY_RIGHT_SHIFT: {
+					shift_active = 0;
+					break;
+				}
+			}
+		}
+	}
 }

@@ -83,7 +83,7 @@ print_string:
 	lodsb
 	cmp AL, 0
 	jz end_print_string
-	mov AH, 0x0E
+	mov AH, 0x07
 	int 0x10
 	jmp print_string
 end_print_string:

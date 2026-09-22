@@ -7,5 +7,7 @@
 	|| pause
 
 
+@node unpack-tokenizer.js
+@unpack-model.js
 @node generate_script.js > build_fs.bat
-@build_fs.bat
+@cmd /c build_fs.bat

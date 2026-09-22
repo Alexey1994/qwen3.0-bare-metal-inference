@@ -20,7 +20,7 @@ Object.keys(vocab).forEach(vocabValue => {
 	var token = vocab[vocabValue]
 	vocabData[token] = vocabValue
 })
-
+/*
 var mergesData = []
 merges.forEach(merge => {
 	var token1 = vocab[merge[0]]
@@ -28,16 +28,16 @@ merges.forEach(merge => {
 	var token3 = vocab[merge[0] + merge[1]]
 	mergesData.push([token1, token2, token3])
 })
-
+*/
 
 var buffer = []
 
 buffer.push(Buffer.alloc(4))
 buffer[0].writeUInt32LE(vocabData.length, 0)
-
+/*
 buffer.push(Buffer.alloc(4))
 buffer[1].writeUInt32LE(mergesData.length, 0)
-
+*/
 
 function bytes_to_unicode() {
 	const bs = []
@@ -79,16 +79,21 @@ vocabData.forEach((word, token) => {
 	var bytes = Buffer.from(word.split('').map(c => unicodeToByte[c]))
 
 	buffer.push(Buffer.alloc(4))
+	buffer[buffer.length-1].writeUInt32LE(token, 0)
+
+	buffer.push(Buffer.alloc(4))
     buffer[buffer.length-1].writeUInt32LE(bytes.length, 0)
 
     buffer.push(bytes)
 })
 
+/*
 mergesData.forEach(merge => {
 	buffer.push(Buffer.alloc(12))
 	buffer[buffer.length-1].writeUInt32LE(merge[0], 0)
 	buffer[buffer.length-1].writeUInt32LE(merge[1], 4)
 	buffer[buffer.length-1].writeUInt32LE(merge[2], 8)
 })
+*/
 
-fs.writeFileSync('tokenizer.bin', Buffer.concat(buffer))
+fs.writeFileSync('model/tokenizer.bin', Buffer.concat(buffer))

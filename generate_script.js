@@ -33,7 +33,10 @@ function file(from, to) {
 console.log('@echo ; > bin/fs.asm')
 
 file(`bin/system.bin`, `system`)
+
+
 file(`model/tokenizer.bin`, `tokenizer`)
+
 file(`model/model/embed_tokens/weight.151936x1024.BF16`, `embed`)
 
 for(var i=0; i<28; ++i) {
