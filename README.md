@@ -1,4 +1,4 @@
-It's inference engine for Qwen3 models with Bare Metal launch process.
+It's inference engine for Qwen3 models using Bare Metal launch process.
 
 ## Requriments
 
